@@ -1,16 +1,21 @@
 import type { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 
-import type { NewWorktreeOptions } from "../../t3/client.ts";
 import { commandIds } from "../../t3/command-ids.ts";
+import type { WorkspaceStrategy } from "../../t3/contracts/commands.ts";
 import {
   resolveHarness,
   resolveModel,
   resolveProject,
   resolveWorktree,
-  type WorktreeChoice,
 } from "../../t3/selection.ts";
-import { composeMessage, renderMessages, summarizeThread, turnResult } from "../presenters.ts";
+import {
+  composeMessage,
+  renderMessages,
+  summarizeThread,
+  truncateText,
+  turnResult,
+} from "../presenters.ts";
 import { MUTATING, READ_ONLY, registerJsonTool, type ClientSource } from "../register-tool.ts";
 import {
   contextSchema,
@@ -76,11 +81,8 @@ export function registerThreadTools(server: McpServer, source: ClientSource): vo
               .string()
               .optional()
               .describe("Name for the new branch; T3 generates one when omitted"),
-            runSetupScript: z
-              .boolean()
-              .optional()
-              .describe("Run the project setup script after creating the worktree (default true)"),
           })
+          .strict()
           .optional()
           .describe(
             "Ask T3 to create a fresh worktree for this thread. Mutually exclusive with worktreePath.",
@@ -111,54 +113,41 @@ export function registerThreadTools(server: McpServer, source: ClientSource): vo
       const ids = commandIds("launch", input.idempotencyKey);
       const text = composeMessage(input.prompt, input.context);
 
-      const existing = shell.threads.find((t) => t.id === ids.threadId);
-      if (existing) {
-        // T3's bootstrap is a chain (create thread, then start the turn). If it broke in between, the
-        // thread exists without a turn: finish the launch under the same command id instead of reporting a reuse.
-        if (!existing.latestTurn) {
-          await client.startTurn({
-            ...ids,
-            text,
-            runtimeMode: existing.runtimeMode,
-            interactionMode: existing.interactionMode,
-          });
+      const { refs } = await client.listRefs(project.workspaceRoot);
+      let workspaceStrategy: WorkspaceStrategy;
+      if (input.newWorktree) {
+        const locals = refs.filter((r) => !r.isRemote);
+        const base = locals.find((r) => r.name === input.newWorktree?.baseBranch);
+        if (!base) {
+          throw new Error(
+            `baseBranch "${input.newWorktree.baseBranch}" is not a local branch of ${project.title}. Known: ${locals.map((r) => r.name).join(", ")}`,
+          );
         }
+        workspaceStrategy = {
+          type: "worktree",
+          baseRef: base.name,
+          startFromOrigin: false,
+          ...(input.newWorktree.branch ? { branch: input.newWorktree.branch } : {}),
+        };
       } else {
-        const { refs } = await client.listRefs(project.workspaceRoot);
-        let choice: WorktreeChoice;
-        let newWorktree: NewWorktreeOptions | undefined;
-        if (input.newWorktree) {
-          const locals = refs.filter((r) => !r.isRemote);
-          const base = locals.find((r) => r.name === input.newWorktree?.baseBranch);
-          if (!base) {
-            throw new Error(
-              `baseBranch "${input.newWorktree.baseBranch}" is not a local branch of ${project.title}. Known: ${locals.map((r) => r.name).join(", ")}`,
-            );
-          }
-          choice = { branch: input.newWorktree.branch ?? null, worktreePath: null };
-          newWorktree = {
-            projectCwd: project.workspaceRoot,
-            baseBranch: base.name,
-            branch: input.newWorktree.branch,
-            runSetupScript: input.newWorktree.runSetupScript ?? true,
-          };
-        } else {
-          choice = resolveWorktree(project, refs, input.worktreePath ?? project.workspaceRoot);
-        }
-        await client.createThread({
-          ...ids,
-          projectId: project.id,
-          title: input.title,
-          modelSelection: { instanceId: harness.instanceId, model: model.slug },
-          runtimeMode: input.runtimeMode ?? "full-access",
-          interactionMode: input.interactionMode ?? "default",
-          ...choice,
-          text,
-          newWorktree,
-        });
+        const choice = resolveWorktree(project, refs, input.worktreePath ?? project.workspaceRoot);
+        const branch = choice.branch ? { branch: choice.branch } : {};
+        workspaceStrategy = choice.worktreePath
+          ? { type: "existing_worktree", worktreePath: choice.worktreePath, ...branch }
+          : { type: "root", ...branch };
       }
+      const created = await client.createThread({
+        ...ids,
+        projectId: project.id,
+        title: input.title,
+        modelSelection: { instanceId: harness.instanceId, model: model.slug },
+        runtimeMode: input.runtimeMode ?? "full-access",
+        interactionMode: input.interactionMode ?? "default",
+        workspaceStrategy,
+        text,
+      });
 
-      const base = { reused: existing !== undefined, idempotencyKey: ids.idempotencyKey };
+      const base = { reused: created.resumed, idempotencyKey: ids.idempotencyKey };
       if (input.wait) {
         const { snapshot, timedOut } = await client.waitForTurn(
           ids.threadId,
@@ -167,7 +156,7 @@ export function registerThreadTools(server: McpServer, source: ClientSource): vo
         );
         return { ...base, ...turnResult(client, snapshot, timedOut) };
       }
-      return { ...base, ...summarizeThread(client, (await client.thread(ids.threadId, 1)).thread) };
+      return { ...base, ...summarizeThread(client, (await client.thread(ids.threadId)).thread) };
     },
   );
 
@@ -194,11 +183,19 @@ export function registerThreadTools(server: McpServer, source: ClientSource): vo
     async ({ threadId, messageLimit, maxChars }) => {
       const client = await source.getClient();
       const limit = messageLimit ?? 10;
-      // Each turn holds at least a user and an assistant message, so this window covers `limit` messages.
-      const snapshot = await client.thread(threadId, Math.ceil(limit / 2) + 1);
+      const snapshot = await client.thread(threadId);
       return {
         ...summarizeThread(client, snapshot.thread),
-        messages: renderMessages(snapshot.thread.messages, limit, maxChars ?? 20_000),
+        messages: renderMessages(snapshot.messages, limit, maxChars ?? 20_000),
+        proposedPlans: snapshot.proposedPlans
+          .toSorted((a, b) => Number(a.status === "active") - Number(b.status === "active"))
+          .slice(-limit)
+          .map((plan) => ({
+            id: plan.id,
+            runId: plan.runId,
+            status: plan.status,
+            markdown: truncateText(plan.markdown, maxChars ?? 20_000),
+          })),
       };
     },
   );

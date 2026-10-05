@@ -1,5 +1,6 @@
 import type { T3Client } from "../t3/client.ts";
 import type { Message, Thread, ThreadSnapshot } from "../t3/contracts/orchestration.ts";
+import { isApproval } from "../t3/thread-state.ts";
 import type { MessageContext } from "./schemas.ts";
 
 export const composeMessage = (prompt: string, context?: MessageContext): string =>
@@ -20,52 +21,51 @@ export const summarizeThread = (client: T3Client, thread: Thread) => ({
   worktreePath: thread.worktreePath,
   runtimeMode: thread.runtimeMode,
   interactionMode: thread.interactionMode,
-  turn: thread.latestTurn && {
-    turnId: thread.latestTurn.turnId,
-    state: thread.latestTurn.state,
-    startedAt: thread.latestTurn.startedAt,
-    completedAt: thread.latestTurn.completedAt,
-  },
-  session: thread.session && { status: thread.session.status, lastError: thread.session.lastError },
-  archived: thread.archivedAt !== null,
-  ...(thread.hasPendingApprovals === undefined
-    ? {}
-    : {
-        needsAttention: {
-          pendingApprovals: thread.hasPendingApprovals,
-          pendingUserInput: thread.hasPendingUserInput ?? false,
-          actionablePlan: thread.hasActionableProposedPlan ?? false,
+  turn:
+    thread.latestRunId === null
+      ? null
+      : {
+          turnId: thread.latestRunId,
+          state: thread.status,
+          startedAt: thread.latestRunStartedAt ?? null,
+          completedAt: thread.latestRunCompletedAt ?? null,
         },
-      }),
+  session: { status: thread.status, lastError: thread.lastError ?? null },
+  archived: thread.archivedAt !== null,
+  needsAttention: {
+    pendingApprovals:
+      thread.pendingRuntimeRequest !== null && isApproval(thread.pendingRuntimeRequest.kind),
+    pendingUserInput: thread.pendingRuntimeRequest?.kind === "user_input",
+    actionablePlan: thread.hasActionableProposedPlan ?? false,
+  },
   url: threadUrl(client, thread.id),
 });
+
+export const truncateText = (text: string, maxChars: number): string =>
+  text.length > maxChars
+    ? `${text.slice(0, maxChars)}\n…[truncated ${text.length - maxChars} chars]`
+    : text;
 
 export const renderMessages = (messages: Message[], limit: number, maxChars: number) =>
   messages.slice(-limit).map((m) => ({
     id: m.id,
     role: m.role,
-    turnId: m.turnId,
+    turnId: m.runId,
     streaming: m.streaming,
     createdAt: m.createdAt,
-    text:
-      m.text.length > maxChars
-        ? `${m.text.slice(0, maxChars)}\n…[truncated ${m.text.length - maxChars} chars]`
-        : m.text,
+    text: truncateText(m.text, maxChars),
   }));
 
-const latestReply = (snapshot: ThreadSnapshot): Message | null => {
-  const { latestTurn, messages } = snapshot.thread;
-  const byTurn = latestTurn?.assistantMessageId
-    ? messages.find((m) => m.id === latestTurn.assistantMessageId)
-    : undefined;
-  return byTurn ?? messages.toReversed().find((m) => m.role === "assistant") ?? null;
-};
-
 export const turnResult = (client: T3Client, snapshot: ThreadSnapshot, timedOut: boolean) => {
-  const reply = latestReply(snapshot);
+  const reply =
+    snapshot.messages.findLast(
+      (message) => message.role === "assistant" && message.runId === snapshot.thread.latestRunId,
+    ) ?? null;
   return {
     ...summarizeThread(client, snapshot.thread),
     timedOut,
+    proposedPlan:
+      snapshot.proposedPlans.findLast((plan) => plan.runId === snapshot.thread.latestRunId) ?? null,
     reply: reply && { messageId: reply.id, streaming: reply.streaming, text: reply.text },
   };
 };

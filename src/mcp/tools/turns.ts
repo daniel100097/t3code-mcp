@@ -4,6 +4,7 @@ import type { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 
 import { commandIds } from "../../t3/command-ids.ts";
+import { isRunInterruptible } from "../../t3/thread-state.ts";
 import { composeMessage, summarizeThread, turnResult } from "../presenters.ts";
 import { MUTATING, READ_ONLY, registerJsonTool, type ClientSource } from "../register-tool.ts";
 import {
@@ -21,7 +22,7 @@ export function registerTurnTools(server: McpServer, source: ClientSource): void
     {
       title: "Send a follow-up prompt",
       description:
-        "Send another user message to an existing T3 thread with the thread's current harness and model. Works while a turn is running: T3 hands the message to the harness mid-turn (steering), exactly as the T3 UI does. A retry with the same idempotencyKey is always safe.",
+        "Send another user message to an existing T3 thread with the thread's current harness and model. During an active run, T3 steers or queues the message according to the harness, as the T3 UI does. A retry with the same idempotencyKey is always safe.",
       input: {
         threadId: z.string(),
         prompt: z.string().min(1),
@@ -42,16 +43,19 @@ export function registerTurnTools(server: McpServer, source: ClientSource): void
       const client = await source.getClient();
       const before = await client.thread(input.threadId);
       const ids = commandIds(input.threadId, input.idempotencyKey);
-      const alreadySent = before.thread.messages.some((m) => m.id === ids.messageId);
-      // No "turn is running" guard on purpose: T3 accepts thread.turn.start mid-turn and forwards it as steering.
-      // Safe even if the message landed after our read: T3 replays the receipt for a repeated commandId.
+      const alreadySent = before.messages.some((m) => m.id === ids.messageId);
+      // T3 resolves delivery against its serialized state and deduplicates command ids.
       if (!alreadySent) {
         await client.startTurn({
           ...ids,
           threadId: input.threadId,
           text: composeMessage(input.prompt, input.context),
-          runtimeMode: input.runtimeMode ?? before.thread.runtimeMode,
-          interactionMode: input.interactionMode ?? before.thread.interactionMode,
+          runtimeMode:
+            input.runtimeMode === before.thread.runtimeMode ? undefined : input.runtimeMode,
+          interactionMode:
+            input.interactionMode === before.thread.interactionMode
+              ? undefined
+              : input.interactionMode,
         });
       }
       const base = { reused: alreadySent, idempotencyKey: ids.idempotencyKey };
@@ -65,7 +69,7 @@ export function registerTurnTools(server: McpServer, source: ClientSource): void
       }
       return {
         ...base,
-        ...summarizeThread(client, (await client.thread(input.threadId, 1)).thread),
+        ...summarizeThread(client, (await client.thread(input.threadId)).thread),
       };
     },
   );
@@ -105,18 +109,26 @@ export function registerTurnTools(server: McpServer, source: ClientSource): void
     },
     async ({ threadId }) => {
       const client = await source.getClient();
-      const before = await client.thread(threadId, 1);
-      const turn = before.thread.latestTurn;
-      if (!turn || turn.state !== "running") {
+      const before = await client.thread(threadId);
+      const run = before.runs
+        .filter((r) => isRunInterruptible(r.status))
+        .toSorted((a, b) => b.ordinal - a.ordinal)[0];
+      if (!run) {
         return {
           cancelled: false,
           reason: "No turn is running.",
           ...summarizeThread(client, before.thread),
         };
       }
-      await client.interruptTurn(randomUUID(), threadId, turn.turnId);
-      const { snapshot } = await client.waitForTurn(threadId, 15_000);
-      return { cancelled: true, ...summarizeThread(client, snapshot.thread) };
+      await client.interruptTurn(randomUUID(), threadId, run.id);
+      const { snapshot, timedOut } = await client.waitForTurn(threadId, 15_000, {
+        expectedRunId: run.id,
+      });
+      return {
+        cancelled: !timedOut && ["interrupted", "cancelled"].includes(snapshot.thread.status),
+        timedOut,
+        ...summarizeThread(client, snapshot.thread),
+      };
     },
   );
 }

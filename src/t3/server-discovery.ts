@@ -19,9 +19,18 @@ const environmentSchema = z.object({
   environmentId: z.string(),
   serverVersion: z.string().optional(),
   label: z.string().optional(),
+  orchestrationProtocolVersion: z.number().optional(),
 });
 export type RuntimeFile = z.infer<typeof runtimeFileSchema>;
 export type EnvironmentInfo = z.infer<typeof environmentSchema>;
+
+export function assertSupportedProtocol(server: EnvironmentInfo): void {
+  if (server.orchestrationProtocolVersion !== 2) {
+    throw new Error(
+      `T3 ${server.serverVersion ?? "(unknown version)"} uses orchestration protocol ${server.orchestrationProtocolVersion ?? "1"}. This client requires protocol 2. Update T3 Code to an Orchestrator V2 build.`,
+    );
+  }
+}
 
 export interface DiscoveredServer extends EnvironmentInfo {
   origin: string;

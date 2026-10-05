@@ -25,7 +25,11 @@ export function createHttpClient(
       let response: Response;
       try {
         response = await fetchImpl(url, {
-          headers: { authorization: `Bearer ${token}`, accept: "application/json" },
+          headers: {
+            authorization: `Bearer ${token}`,
+            accept: "application/json",
+            "x-t3-orchestration-protocol": "2",
+          },
           signal: AbortSignal.timeout(30_000),
         });
       } catch (error) {

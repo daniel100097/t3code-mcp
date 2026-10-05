@@ -18,7 +18,7 @@ Runs on Bun with selectable stdio, Streamable HTTP, or legacy HTTP/SSE for MCP c
 | `t3_list_harnesses` | Configured harnesses and their models, with a usable flag and reason                            |
 | `t3_list_threads`   | Recent threads, newest first, optionally per project                                            |
 | `t3_create_thread`  | Create a thread with an explicit project + worktree + harness + model and send the first prompt |
-| `t3_send_message`   | Send a follow-up prompt to an existing thread (steers a running turn)                           |
+| `t3_send_message`   | Send a follow-up prompt to an existing thread (steers or queues during an active run)           |
 | `t3_get_thread`     | Status, latest turn state, and recent messages including the assistant reply                    |
 | `t3_wait_for_turn`  | Block until the current turn finishes, then return the reply                                    |
 | `t3_cancel_turn`    | Interrupt the running turn                                                                      |
@@ -32,7 +32,7 @@ Runs on Bun with selectable stdio, Streamable HTTP, or legacy HTTP/SSE for MCP c
 ## Requirements
 
 - Bun 1.2 or newer.
-- A running T3 Code server on this machine (desktop app, `t3 start`, or `npx t3`).
+- A running T3 Code server with Orchestrator V2 on this machine (desktop app, `t3 start`, or `npx t3`).
 - A pairing code from that T3.
 
 ## Install and pair
@@ -217,7 +217,9 @@ t3_get_thread      {threadId}                      → status + recent messages
 t3_cancel_turn     {threadId}                      → stop a running turn
 ```
 
-Every thread result includes `url` (opens the thread in the T3 web UI) and `turn.state` (`running`, `completed`, `interrupted`, `error`).
+Detail reads include `proposedPlans` with plan markdown. Wait results include `proposedPlan` for the awaited run, even when that run has no assistant message. `needsAttention.actionablePlan` reports active proposed plans.
+
+Every thread result includes `url` (opens the thread in the T3 web UI) and `turn.state` (`preparing`, `queued`, `starting`, `running`, `waiting`, `completed`, `interrupted`, `failed`, `cancelled`, `rolled_back`).
 
 ## Environment variables
 
@@ -238,12 +240,16 @@ CLI commands: `serve` (default), `pair <url-or-code>`, `status`, `help`. Run `se
 - **MCP transports.** Stdio uses the SDK's stdio server. Streamable HTTP uses its stateless HTTP handler, supporting both current and older MCP protocol versions. Legacy SSE uses one event stream and a separate message endpoint per client. Network modes support multiple clients and close connections on shutdown.
 - **Discovery.** Reads `<T3 home>/userdata/server-runtime.json` (then `dev/`), checks the pid is alive, and probes `/.well-known/t3/environment`. The server connects lazily on the first tool call, so the MCP server starts even while T3 is still booting.
 - **Auth.** Bearer token from T3's pairing flow (`POST /oauth/token` token exchange), sent on HTTP requests and on the WebSocket upgrade.
-- **Reads.** `GET /api/orchestration/shell` and `GET /api/orchestration/threads/:id?turnLimit=`.
-- **Commands.** `orchestration.dispatchCommand` over T3's WebSocket RPC: `thread.turn.start` with `bootstrap.createThread` (and optional `prepareWorktree`), and `thread.turn.interrupt`.
+- **Reads.** `GET /api/orchestration/shell` and `GET /api/orchestration/threads/:id`.
+- **Commands.** `orchestration.launchThread` starts a thread with an explicit workspace strategy. `orchestration.dispatchCommand` sends `message.dispatch`, mode changes, and `run.interrupt`. T3 resolves delivery against its current state and harness capabilities. Explicit mode changes use separate commands before the message. If message delivery fails, the selected mode can remain changed; retries reuse the command ids.
 - **RPC client.** `server.getConfig` and `vcs.listRefs` are socket-only, so `src/t3/transport/rpc-client.ts` speaks the RPC JSON envelope on Bun's built-in WebSocket: `Request`, `Chunk` + `Ack` back-pressure, `Exit`, `Ping`/`Pong`, `Interrupt`.
-- **Waiting.** One `orchestration.subscribeThread` stream stays open per wait; on settle events the HTTP snapshot is re-read a few times. After a dispatch only the turn carrying your own message id counts.
+- **Waiting.** `orchestration.subscribeThread` resumes after the HTTP snapshot sequence. Run and message events trigger a snapshot read. Waiting tracks the requested run, including queued work, and returns only that run's reply.
 
-Wire contracts target T3 Code server `0.0.43-nightly.20260918`.
+Wire contracts target T3 Code server `0.0.46-nightly.20261005.2676`, orchestration protocol 2. HTTP reads send `x-t3-orchestration-protocol: 2`; WebSocket connections send `orchestrationProtocol=2`. Older servers fail with an upgrade message before authentication or commands.
+
+T3 Code now includes its own MCP for agents running inside T3. This repository remains a separate adapter for external MCP clients, with stdio, Streamable HTTP, legacy SSE, Docker, and caller-supplied idempotency keys.
+
+V2 launch preparation always runs the project's setup script. The obsolete `newWorktree.runSetupScript` option is rejected before launch. Thread reads use the full V2 projection so waiting and retries can find earlier messages. `messageLimit` limits the MCP response, not the server snapshot.
 
 ## Development
 

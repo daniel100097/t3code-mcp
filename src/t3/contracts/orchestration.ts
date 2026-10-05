@@ -18,54 +18,120 @@ export const projectSchema = z.object({
   workspaceRoot: z.string(),
   defaultModelSelection: modelSelectionSchema.nullable(),
 });
-export const latestTurnSchema = z.object({
-  turnId: z.string(),
-  state: z.string(),
-  startedAt: z.string().nullable(),
-  completedAt: z.string().nullable(),
-  assistantMessageId: z.string().nullable(),
-});
-export const threadSchema = z.object({
+const appThreadSchema = z.object({
   id: z.string(),
   projectId: z.string(),
   title: z.string(),
+  providerInstanceId: z.string(),
   modelSelection: modelSelectionSchema,
   runtimeMode: z.enum(RUNTIME_MODES),
   interactionMode: z.enum(INTERACTION_MODES),
   branch: z.string().nullable(),
   worktreePath: z.string().nullable(),
-  latestTurn: latestTurnSchema.nullable(),
   updatedAt: z.string(),
   archivedAt: z.string().nullable(),
-  session: z.object({ status: z.string(), lastError: z.string().nullable() }).nullable(),
-  // Attention flags appear only in shell snapshots.
-  hasPendingApprovals: z.boolean().optional(),
-  hasPendingUserInput: z.boolean().optional(),
+});
+export const runtimeRequestSchema = z.object({ kind: z.string(), status: z.string() });
+export const threadSchema = appThreadSchema.extend({
+  latestRunId: z.string().nullable(),
+  latestRunStartedAt: z.string().nullable().optional(),
+  latestRunCompletedAt: z.string().nullable().optional(),
+  status: z.string(),
+  lastError: z.string().nullable().optional(),
+  pendingRuntimeRequest: runtimeRequestSchema.pick({ kind: true }).nullable(),
   hasActionableProposedPlan: z.boolean().optional(),
 });
 export const shellSnapshotSchema = z.object({
+  schemaVersion: z.number(),
   snapshotSequence: z.number(),
   projects: z.array(projectSchema),
   threads: z.array(threadSchema),
+  archivedThreads: z.array(threadSchema),
 });
 export const messageSchema = z.object({
   id: z.string(),
   role: z.string(),
   text: z.string(),
-  turnId: z.string().nullable(),
+  runId: z.string().nullable(),
   streaming: z.boolean(),
   createdAt: z.string(),
 });
-export const threadDetailSchema = threadSchema.extend({ messages: z.array(messageSchema) });
+export const runSchema = z.object({
+  id: z.string(),
+  ordinal: z.number().int().positive(),
+  rootNodeId: z.string().nullable(),
+  queueHeld: z.boolean().optional(),
+  userMessageId: z.string(),
+  status: z.string(),
+  requestedAt: z.string(),
+  startedAt: z.string().nullable(),
+  completedAt: z.string().nullable(),
+});
+const turnItemSchema = z
+  .object({
+    id: z.string(),
+    type: z.string(),
+    runId: z.string().nullable(),
+    nodeId: z.string().nullable(),
+    status: z.string(),
+    ordinal: z.number(),
+    updatedAt: z.string(),
+    planId: z.string().optional(),
+    failure: z.object({ class: z.string(), message: z.string() }).optional(),
+  })
+  .refine((item) => item.type !== "proposed_plan" || item.planId !== undefined, {
+    path: ["planId"],
+    message: "Proposed plan items must include a plan id",
+  })
+  .refine((item) => item.type !== "error" || item.failure !== undefined, {
+    path: ["failure"],
+    message: "Error items must include a failure",
+  });
+const planFields = { id: z.string(), runId: z.string().nullable(), status: z.string() };
+const proposedPlanSchema = z.object({
+  ...planFields,
+  kind: z.literal("proposed_plan"),
+  markdown: z.string(),
+});
+const planSchema = z.discriminatedUnion("kind", [
+  proposedPlanSchema,
+  z.object({ ...planFields, kind: z.literal("todo_list") }),
+]);
 export const threadSnapshotSchema = z.object({
   snapshotSequence: z.number(),
-  thread: threadDetailSchema,
+  projection: z.object({
+    thread: appThreadSchema,
+    runs: z.array(runSchema),
+    messages: z.array(messageSchema),
+    providerSessions: z.array(
+      z.object({
+        providerInstanceId: z.string(),
+        lastError: z.string().nullable(),
+        updatedAt: z.string(),
+      }),
+    ),
+    turnItems: z.array(turnItemSchema),
+    runtimeRequests: z.array(runtimeRequestSchema),
+    plans: z.array(planSchema),
+  }),
 });
-
 export type Project = z.infer<typeof projectSchema>;
-export type LatestTurn = z.infer<typeof latestTurnSchema>;
 export type Thread = z.infer<typeof threadSchema>;
-export type ShellSnapshot = z.infer<typeof shellSnapshotSchema>;
+export type Run = z.infer<typeof runSchema>;
 export type Message = z.infer<typeof messageSchema>;
-export type ThreadDetail = z.infer<typeof threadDetailSchema>;
-export type ThreadSnapshot = z.infer<typeof threadSnapshotSchema>;
+export type RuntimeRequest = z.infer<typeof runtimeRequestSchema>;
+export type WireThreadSnapshot = z.infer<typeof threadSnapshotSchema>;
+export interface ShellSnapshot {
+  snapshotSequence: number;
+  projects: Project[];
+  threads: Thread[];
+}
+export interface ThreadSnapshot {
+  snapshotSequence: number;
+  thread: Thread;
+  runs: Run[];
+  messages: Message[];
+  runtimeRequests: RuntimeRequest[];
+  runErrors: Record<string, string>;
+  proposedPlans: z.infer<typeof proposedPlanSchema>[];
+}

@@ -33,6 +33,7 @@ describe("RpcClient", () => {
         const url = new URL(request.url);
         if (
           url.pathname === "/ws" &&
+          url.searchParams.get("orchestrationProtocol") === "2" &&
           srv.upgrade(request, {
             data: { auth: request.headers.get("authorization"), path: url.pathname + url.search },
           })
@@ -147,7 +148,9 @@ describe("RpcClient", () => {
     const client = new RpcClient(origin, "secret");
     expect(await client.call("echo", { a: 1 })).toEqual({ a: 1 });
     expect(seen[0]?.auth).toBe("Bearer secret");
-    expect(seen[0]?.path).toBe("/ws?clientSurface=web&connectionMethod=direct");
+    expect(seen[0]?.path).toBe(
+      "/ws?clientSurface=web&connectionMethod=direct&orchestrationProtocol=2",
+    );
     const request = inbound.find((m) => m._tag === "Request");
     expect(request).toMatchObject({
       _tag: "Request",

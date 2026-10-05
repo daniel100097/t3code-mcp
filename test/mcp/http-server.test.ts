@@ -35,7 +35,15 @@ function harness(transport: "http" | "sse") {
   const fake = new T3Client({
     server: { origin: "http://t3", environmentId: "env", source: "test", pid: 0 },
     tokenSource: "test",
-    http: { get: async () => ({ snapshotSequence: 1, projects, threads: [] }) },
+    http: {
+      get: async () => ({
+        schemaVersion: 2,
+        snapshotSequence: 1,
+        projects,
+        threads: [],
+        archivedThreads: [],
+      }),
+    },
     rpc: { call: unexpectedCall, stream: unexpectedCall, close() {} },
   });
   let connections = 0;

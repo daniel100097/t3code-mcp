@@ -111,14 +111,17 @@ async function status(): Promise<void> {
   try {
     const connection = await connectToT3();
     const client = new T3Client(connection);
-    const [shell, config] = await Promise.all([client.shell(), client.config()]);
-    connection.rpc.close();
-    console.log(`Token: ok (${connection.tokenSource})`);
-    console.log(
-      `Projects: ${shell.projects.length}, threads: ${shell.threads.length}, harnesses: ${config.providers.map((p) => p.instanceId).join(", ")}`,
-    );
+    try {
+      const [shell, config] = await Promise.all([client.shell(), client.config()]);
+      console.log(`Token: ok (${connection.tokenSource})`);
+      console.log(
+        `Projects: ${shell.projects.length}, threads: ${shell.threads.length}, harnesses: ${config.providers.map((p) => p.instanceId).join(", ")}`,
+      );
+    } finally {
+      connection.rpc.close();
+    }
   } catch (error) {
-    console.log(`Token: ${error instanceof Error ? error.message : String(error)}`);
+    console.log(`Connection: ${error instanceof Error ? error.message : String(error)}`);
     process.exitCode = 1;
   }
 }

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  assertSupportedProtocol,
   discoverServer,
   parseRuntimeFile,
   probeEnvironment,
@@ -100,5 +101,17 @@ describe("discoverServer", () => {
     await expect(
       discoverServer({ env: {}, home, fetchImpl, isAlive: () => false }),
     ).rejects.toThrow(/No running T3 server found.*server-runtime\.json/);
+  });
+});
+
+describe("protocol compatibility", () => {
+  it("rejects V1 and unknown future protocols with an upgrade error", () => {
+    expect(() => assertSupportedProtocol(environment)).toThrow(/requires protocol 2/);
+    expect(() =>
+      assertSupportedProtocol({ ...environment, orchestrationProtocolVersion: 3 }),
+    ).toThrow(/protocol 3/);
+    expect(() =>
+      assertSupportedProtocol({ ...environment, orchestrationProtocolVersion: 2 }),
+    ).not.toThrow();
   });
 });

@@ -1,4 +1,6 @@
-import { threadSnapshotSchema, type ThreadSnapshot } from "./contracts/orchestration.ts";
+import type { ThreadSnapshot } from "./contracts/orchestration.ts";
+import { threadSnapshotSchema } from "./contracts/orchestration.ts";
+import { projectThreadSnapshot } from "./thread-state.ts";
 import type { HttpClient } from "./transport/http-client.ts";
 
 export function assertThreadSnapshot(snapshot: unknown): ThreadSnapshot {
@@ -9,14 +11,13 @@ export function assertThreadSnapshot(snapshot: unknown): ThreadSnapshot {
       `T3 thread snapshot has invalid fields: ${fields}. The T3 server contract may have changed; update t3code-mcp.`,
     );
   }
-  return result.data;
+  return projectThreadSnapshot(result.data);
 }
 export async function readThreadSnapshot(
   http: HttpClient,
   threadId: string,
-  turnLimit?: number,
 ): Promise<ThreadSnapshot> {
   return assertThreadSnapshot(
-    await http.get(`/api/orchestration/threads/${encodeURIComponent(threadId)}`, { turnLimit }),
+    await http.get(`/api/orchestration/threads/${encodeURIComponent(threadId)}`),
   );
 }

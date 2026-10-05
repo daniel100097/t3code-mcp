@@ -3,7 +3,9 @@ import * as z from "zod/v4";
 export const modelSelectionSchema = z.object({
   instanceId: z.string(),
   model: z.string(),
-  options: z.record(z.string(), z.unknown()).optional(),
+  options: z
+    .array(z.object({ id: z.string(), value: z.union([z.string(), z.boolean()]) }))
+    .optional(),
 });
 export const providerModelSchema = z.object({
   slug: z.string(),

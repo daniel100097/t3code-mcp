@@ -1,5 +1,9 @@
 import { resolveAccessToken } from "./credentials.ts";
-import { discoverServer, type DiscoveredServer } from "./server-discovery.ts";
+import {
+  assertSupportedProtocol,
+  discoverServer,
+  type DiscoveredServer,
+} from "./server-discovery.ts";
 import { createHttpClient, type HttpClient } from "./transport/http-client.ts";
 import { RpcClient } from "./transport/rpc-client.ts";
 
@@ -12,6 +16,7 @@ export interface T3Connection {
 
 export async function connectToT3(env: NodeJS.ProcessEnv = process.env): Promise<T3Connection> {
   const server = await discoverServer({ env });
+  assertSupportedProtocol(server);
   const { token, source } = await resolveAccessToken(server.origin, env);
   return {
     server,
